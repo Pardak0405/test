@@ -1,0 +1,123 @@
+import { UserMeResponse } from "../core/ApiSchemas";
+import {
+  ColorPalette,
+  Cosmetics,
+  CosmeticsSchema,
+  Pattern,
+} from "../core/CosmeticSchemas";
+import { createCheckoutSession, getApiBase } from "./Api";
+
+export async function handlePurchase(
+  pattern: Pattern,
+  colorPalette: ColorPalette | null,
+) {
+  if (pattern.product === null) {
+    alert("This pattern is not available for purchase.");
+    return;
+  }
+
+  const url = await createCheckoutSession(
+    pattern.product.priceId,
+    colorPalette?.name ?? null,
+  );
+  if (url === false) {
+    alert("Failed to create checkout session.");
+    return;
+  }
+
+  // Redirect to Stripe checkout
+  window.location.href = url;
+}
+
+let __cosmetics: Promise<Cosmetics | null> | null = null;
+let __cosmeticsHash: string | null = null;
+
+function simpleHash(str: string): string {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = (hash << 5) - hash + char;
+    hash = hash & hash;
+  }
+  return hash.toString(36);
+}
+
+export async function fetchCosmetics(): Promise<Cosmetics | null> {
+  if (__cosmetics !== null) {
+    return __cosmetics;
+  }
+  __cosmetics = (async () => {
+    try {
+      const response = await fetch(`${getApiBase()}/cosmetics.json`);
+      if (!response.ok) {
+        console.error(`HTTP error! status: ${response.status}`);
+        return null;
+      }
+      const result = CosmeticsSchema.safeParse(await response.json());
+      if (!result.success) {
+        console.error(`Invalid cosmetics: ${result.error.message}`);
+        return null;
+      }
+      const patternKeys = Object.keys(result.data.patterns).sort();
+      const hashInput = patternKeys
+        .map((k) => k + (result.data.patterns[k].product ? "sale" : ""))
+        .join(",");
+      __cosmeticsHash = simpleHash(hashInput);
+      return result.data;
+    } catch (error) {
+      console.error("Error getting cosmetics:", error);
+      return null;
+    }
+  })();
+  return __cosmetics;
+}
+
+export async function getCosmeticsHash(): Promise<string | null> {
+  await fetchCosmetics();
+  return __cosmeticsHash;
+}
+
+export function patternRelationship(
+  pattern: Pattern,
+  colorPalette: { name: string; isArchived?: boolean } | null,
+  userMeResponse: UserMeResponse | false,
+  affiliateCode: string | null,
+): "owned" | "purchasable" | "blocked" {
+  const flares =
+    userMeResponse === false ? [] : (userMeResponse.player.flares ?? []);
+  if (flares.includes("pattern:*")) {
+    return "owned";
+  }
+
+  if (colorPalette === null) {
+    // For backwards compatibility only show non-colored patterns if they are owned.
+    if (flares.includes(`pattern:${pattern.name}`)) {
+      return "owned";
+    }
+    return "blocked";
+  }
+
+  const requiredFlare = `pattern:${pattern.name}:${colorPalette.name}`;
+
+  if (flares.includes(requiredFlare)) {
+    return "owned";
+  }
+
+  if (pattern.product === null) {
+    // We don't own it and it's not for sale, so don't show it.
+    return "blocked";
+  }
+
+  if (colorPalette?.isArchived) {
+    // We don't own the color palette, and it's archived, so don't show it.
+    return "blocked";
+  }
+
+  if (affiliateCode !== pattern.affiliateCode) {
+    // Pattern is for sale, but it's not the right store to show it on.
+    return "blocked";
+  }
+
+  // Patterns is for sale, and it's the right store to show it on.
+  return "purchasable";
+}
